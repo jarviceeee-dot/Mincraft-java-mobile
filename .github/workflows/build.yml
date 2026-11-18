@@ -7,6 +7,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Décompresser
         run: unzip -q ./*.zip
+      - name: Fix backslash n
+        run: |
+          perl -0pi -e 's/\\n(?=\s*(private|public|addTap))/\n/g' Ractex-Bedrock-Java-Android/app/src/main/java/fr/ractex/bedrockjava/*.java
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
