@@ -1,0 +1,95 @@
+name: Build Ractex Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - '*.zip'
+      - '.github/workflows/build-windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+
+      - name: Installer Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Extraire le projet PC depuis le ZIP
+        id: project
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem -Path . -Filter 'Ractex-PC*.zip' -File | Select-Object -First 1
+          if (-not $archive) {
+            throw "Aucune archive Ractex-PC*.zip trouvée à la racine du dépôt."
+          }
+
+          $destination = Join-Path $env:RUNNER_TEMP 'Ractex-PC-source'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $destination -Force
+
+          $buildFile = Get-ChildItem -Path $destination -Recurse -File |
+            Where-Object { $_.Name -in @('settings.gradle', 'settings.gradle.kts', 'build.gradle', 'build.gradle.kts') } |
+            Select-Object -First 1
+
+          if (-not $buildFile) {
+            throw "Le ZIP a été extrait, mais aucun fichier Gradle n'a été trouvé. Vérifie que le ZIP contient le projet source PC."
+          }
+
+          $projectDir = $buildFile.Directory.FullName
+          "project_dir=$projectDir" >> $env:GITHUB_OUTPUT
+          Write-Host "Projet Gradle trouvé dans : $projectDir"
+
+      - name: Compiler et créer la distribution
+        shell: pwsh
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        run: |
+          Set-Location $env:PROJECT_DIR
+          gradle clean installDist
+
+      - name: Créer Ractex.exe
+        shell: pwsh
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.project_dir }}
+        run: |
+          $installDir = Join-Path $env:PROJECT_DIR 'build/install/RactexPC'
+          if (-not (Test-Path $installDir)) {
+            $installDir = Get-ChildItem (Join-Path $env:PROJECT_DIR 'build/install') -Directory |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $installDir) { throw "La distribution Gradle installDist est introuvable." }
+
+          $libDir = Join-Path $installDir 'lib'
+          $jar = Get-ChildItem $libDir -Filter '*.jar' -File |
+            Where-Object { $_.Name -notmatch '(sources|javadoc)' } |
+            Select-Object -First 1
+          if (-not $jar) { throw "Aucun fichier JAR trouvé dans $libDir" }
+
+          New-Item -ItemType Directory -Force -Path 'build/package' | Out-Null
+          jpackage --type app-image --name Ractex --input $libDir `
+            --main-jar $jar.Name `
+            --main-class 'fr.ractex.pc.RactexPC' `
+            --dest 'build/package' --app-version '0.1.0' --vendor 'Ractex'
+
+          if (-not (Test-Path 'build/package/Ractex/Ractex.exe')) {
+            throw "Ractex.exe n'a pas été généré. Vérifie le nom de la classe principale dans le projet."
+          }
+
+          Compress-Archive -Path 'build/package/Ractex' -DestinationPath 'Ractex-Windows.zip' -Force
+
+      - name: Publier Ractex Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ractex-Windows
+          path: Ractex-Windows.zip
+          if-no-files-found: error
+          retention-days: 14
