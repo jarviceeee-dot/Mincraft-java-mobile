@@ -1,0 +1,82 @@
+name: Build Ractex for iOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '**/*.swift'
+      - '**/*.xcodeproj/**'
+      - '**/*.xcworkspace/**'
+      - '.github/workflows/build-ios.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    name: Compile iOS app
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Find Xcode project
+        id: project
+        shell: bash
+        run: |
+          WORKSPACE=$(find . -maxdepth 4 -name '*.xcworkspace' -not -path '*/.git/*' | head -n 1)
+          PROJECT=$(find . -maxdepth 4 -name '*.xcodeproj' -not -path '*/.git/*' | head -n 1)
+          if [[ -n "$WORKSPACE" ]]; then
+            echo "container=-workspace" >> "$GITHUB_OUTPUT"
+            echo "path=$WORKSPACE" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$PROJECT" ]]; then
+            echo "container=-project" >> "$GITHUB_OUTPUT"
+            echo "path=$PROJECT" >> "$GITHUB_OUTPUT"
+          else
+            echo "No .xcodeproj or .xcworkspace found. Ractex needs a native iOS project before it can be compiled for iPhone." >&2
+            exit 1
+          fi
+
+      - name: Resolve scheme
+        id: scheme
+        shell: bash
+        env:
+          IOS_SCHEME: ${{ vars.IOS_SCHEME }}
+        run: |
+          if [[ -n "$IOS_SCHEME" ]]; then
+            echo "name=$IOS_SCHEME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LIST=$(xcodebuild -list -json "${{ steps.project.outputs.container }}" "${{ steps.project.outputs.path }}")
+          SCHEME=$(python3 -c 'import json,sys; d=json.load(sys.stdin); k=next(iter(d)); s=d[k].get("schemes",[]); print(s[0] if s else "")' <<< "$LIST")
+          if [[ -z "$SCHEME" ]]; then
+            echo "No shared Xcode scheme found. Set the repository variable IOS_SCHEME." >&2
+            exit 1
+          fi
+          echo "name=$SCHEME" >> "$GITHUB_OUTPUT"
+
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild \
+            "${{ steps.project.outputs.container }}" "${{ steps.project.outputs.path }}" \
+            -scheme "${{ steps.scheme.outputs.name }}" \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Upload compiled app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ractex-iOS-Simulator
+          path: build/DerivedData/Build/Products/Release-iphonesimulator/*.app
+          if-no-files-found: error
+          retention-days: 14
