@@ -1,0 +1,88 @@
+name: Build Ractex Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - '**/*.zip'
+      - 'desktop/**'
+      - '.github/workflows/build-windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Trouver et extraire le projet PC
+        shell: pwsh
+        run: |
+          $workspace = $env:GITHUB_WORKSPACE
+          $desktop = Get-ChildItem $workspace -Directory -Recurse |
+            Where-Object { Test-Path (Join-Path $_.FullName 'build.gradle') -and (Test-Path (Join-Path $_.FullName 'src/main/java/fr/ractex/pc/RactexPC.java')) } |
+            Select-Object -First 1
+
+          if (-not $desktop) {
+            $extractRoot = Join-Path $workspace '_ractex_extracted'
+            New-Item -ItemType Directory -Force $extractRoot | Out-Null
+            $archives = Get-ChildItem $workspace -Filter '*.zip' -File
+            foreach ($archive in $archives) {
+              $target = Join-Path $extractRoot ([IO.Path]::GetFileNameWithoutExtension($archive.Name))
+              Expand-Archive -LiteralPath $archive.FullName -DestinationPath $target -Force
+            }
+            $desktop = Get-ChildItem $extractRoot -Directory -Recurse |
+              Where-Object { Test-Path (Join-Path $_.FullName 'build.gradle') -and (Test-Path (Join-Path $_.FullName 'src/main/java/fr/ractex/pc/RactexPC.java')) } |
+              Select-Object -First 1
+          }
+
+          if (-not $desktop) {
+            throw "Projet PC introuvable. Le dépôt doit contenir desktop/build.gradle ou une archive ZIP contenant le dossier desktop."
+          }
+          "RACTEX_DESKTOP=$($desktop.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "Projet PC trouvé : $($desktop.FullName)"
+
+      - name: Compiler la distribution PC
+        shell: pwsh
+        run: |
+          gradle -p "$env:RACTEX_DESKTOP" clean installDist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Créer Ractex Windows
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RACTEX_DESKTOP 'build/install'
+          $install = Get-ChildItem $installRoot -Directory | Select-Object -First 1
+          if (-not $install) { throw 'Sortie Gradle installDist introuvable.' }
+          $lib = Join-Path $install.FullName 'lib'
+          $jar = Get-ChildItem $lib -Filter '*.jar' |
+            Where-Object { $_.Name -notmatch 'lwjgl|joml' } |
+            Select-Object -First 1
+          if (-not $jar) { throw 'JAR principal de Ractex introuvable.' }
+
+          $packageDir = Join-Path $env:RACTEX_DESKTOP 'build/package'
+          New-Item -ItemType Directory -Force $packageDir | Out-Null
+          jpackage --type app-image --name Ractex --input $lib --main-jar $jar.Name --main-class fr.ractex.pc.RactexPC --dest $packageDir --app-version 0.2.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $output = Join-Path $env:RACTEX_DESKTOP 'build/Ractex-Windows.zip'
+          Compress-Archive -Path (Join-Path $packageDir 'Ractex') -DestinationPath $output -Force
+          "RACTEX_OUTPUT=$output" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Publier Ractex Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ractex-Windows
+          path: ${{ env.RACTEX_OUTPUT }}
+          if-no-files-found: error
